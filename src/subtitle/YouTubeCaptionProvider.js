@@ -959,10 +959,15 @@ export class YouTubeCaptionProvider {
     // 原位替换渲染模式（复刻沉浸式翻译方案）：不创建自绘悬浮层，
     // 直接把译文写进 YouTube 原生字幕段落文本节点，单一渲染路径无闪跳。
     if (this.#setting.inplaceRender === true) {
-      this.#inplaceRenderer = new NativeCaptionInplace({
-        getSubtitles: () => this.#subtitles,
-        setting: this.#setting,
-      });
+      // 兜底层常驻：无论主链路（响应改写）是否已接管数据源，
+      // DOM 观察器都会把漏网请求放行的英文 cue 在绘制前替换为译文。
+      if (!this.#inplaceRenderer) {
+        this.#inplaceRenderer = new NativeCaptionInplace({
+          getSubtitles: () => this.#subtitles,
+          setting: this.#setting,
+        });
+        this.#inplaceRenderer.start();
+      }
       // 侧边字幕列表与悬浮层共用同一更新回调，保持联动行为一致
       const showListInplace = isSubtitleModeEnabled(
         this.#setting.showList,
@@ -991,7 +996,6 @@ export class YouTubeCaptionProvider {
         this.#subtitleListManager.turnOnAutoSub();
       }
       // 原生字幕窗口本身就是译文字幕窗口，无需隐藏
-      this.#inplaceRenderer.start();
       this.#playerUi.showNotification(this.#i18n("subtitle_load_succeed"));
       return;
     }
@@ -1044,6 +1048,10 @@ export class YouTubeCaptionProvider {
    * 响应改写路径：翻译页面世界派发来的字幕文本行，并把"原文->译文"映射推回页面世界。
    * 与 #handleInterceptedRequest 的断句/悬浮层流程完全独立，互不影响。
    *
+   * 同时把译文喂给原位替换渲染器作为兜底层：响应改写漏网的请求（如
+   * responseType=json 的 XHR、非拦截路径的加载器）会放行英文原文，
+   * 由 DOM 层在绘制前替换为译文，保证任何情况下不出现纯英文字幕。
+   *
    * @private
    * @param {string} requestKey 页面世界生成的请求标识（视频|语言|轨道 组合键）。
    * @param {string} requestUrl 拦截到的 timedtext 请求 URL。
@@ -1085,6 +1093,15 @@ export class YouTubeCaptionProvider {
             .catch(() => "")
         )
       );
+
+      // 喂给 DOM 兜底渲染器：原文行 -> 译文
+      const fallbackMap = new Map();
+      lines.forEach((text, i) => {
+        if (translations[i]) fallbackMap.set(text, translations[i]);
+      });
+      if (fallbackMap.size && this.#inplaceRenderer) {
+        this.#inplaceRenderer.ingestTranslations(fallbackMap);
+      }
 
       window.postMessage(
         {

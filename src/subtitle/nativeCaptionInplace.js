@@ -42,6 +42,9 @@ export class NativeCaptionInplace {
   #translationMap = new Map();
   // 段落被替换后的回调（供侧边字幕列表面板同步高亮），签名同 BilingualSubtitleManager.onSubtitleUpdate
   onSubtitleUpdate = null;
+  // 响应改写链路推送的兜底译文：归一化原文 -> 纯译文文本。
+  // 主链路（timedtext 响应改写）漏网的英文 cue 由该映射在 DOM 层接住。
+  #fallbackTranslations = new Map();
 
   /**
    * @param {object} param0 参数对象。
@@ -85,6 +88,24 @@ export class NativeCaptionInplace {
     this.#observer = null;
     this.restoreAll();
     logger.info("NativeCaptionInplace: stopped");
+  }
+
+  /**
+   * 响应改写链路推送的译文映射（原文 -> 译文），作为 DOM 层兜底数据源。
+   *
+   * @param {Map<string,string>} translations 原文到译文的映射。
+   * @returns {void}
+   */
+  ingestTranslations(translations) {
+    if (!(translations instanceof Map) || !translations.size) return;
+    for (const [text, trText] of translations) {
+      const key = normalizeKey(text);
+      const tr = String(trText || "").trim();
+      if (key && tr) {
+        this.#fallbackTranslations.set(key, tr);
+      }
+    }
+    this.sync();
   }
 
   /**
@@ -163,21 +184,21 @@ export class NativeCaptionInplace {
         ? record.original
         : currentText;
 
+    const replacement = this.#resolveReplacement(original);
+    if (!replacement || replacement === currentText) return;
+
     const sub = this.#translationMap.get(normalizeKey(original));
-    if (!sub) return;
+    this.#applied.set(segment, { original, applied: replacement });
+    segment.textContent = replacement;
 
-    const composed = this.#composeDisplay(sub);
-    if (!composed || composed === currentText) return;
-
-    this.#applied.set(segment, { original, applied: composed });
-    segment.textContent = composed;
-
-    this.onSubtitleUpdate?.({
-      start: sub.start,
-      end: sub.end,
-      text: sub.text,
-      translation: sub.translation,
-    });
+    if (sub) {
+      this.onSubtitleUpdate?.({
+        start: sub.start,
+        end: sub.end,
+        text: sub.text,
+        translation: sub.translation,
+      });
+    }
   }
 
   /**
@@ -194,6 +215,7 @@ export class NativeCaptionInplace {
         segment.textContent = record.original;
       }
     }
+    this.#fallbackTranslations.clear();
   }
 
   /**
@@ -233,6 +255,24 @@ export class NativeCaptionInplace {
       }
     }
     this.#translationMap = map;
+  }
+
+  /**
+   * 查询段落文本对应的替换文本。
+   * 优先用主链路字幕数据（含双语合成），未命中时回退响应改写链路推送的纯译文。
+   *
+   * @param {string} segmentText 段落当前文本。
+   * @returns {string|null} 替换文本；null 表示无可用译文，保持原文。
+   */
+  #resolveReplacement(segmentText) {
+    const key = normalizeKey(segmentText);
+    if (!key) return null;
+
+    const sub = this.#translationMap.get(key);
+    const composed = sub ? this.#composeDisplay(sub) : null;
+    if (composed) return composed;
+
+    return this.#fallbackTranslations.get(key) || null;
   }
 
   /**
