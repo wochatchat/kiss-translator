@@ -170,6 +170,7 @@ export const OPT_ENHANCE_MOBILE_OFF = "mobile_off"; // 移动端浏览器中默�
 // --- 字幕翻译核心配置 ---
 export const DEFAULT_SUBTITLE_SETTING = {
   enabled: true, // 是否自动开启视频字幕翻译功能
+  inplaceRender: true, // 原生字幕原位替换渲染（复刻沉浸式翻译方案，无闪跳）；false 时回退自绘悬浮层
   apiSlug: OPT_TRANS_MICROSOFT, // 默认的字幕翻译接口
   segSlug: "-", // 智能 AI 断句/字幕合并的算法选择 ("-" 表示禁用 AI 段落合并)
   forceSubtitleRetranslate: false, // AI 断句服务与翻译服务不同时，是否强制使用翻译服务重翻译文

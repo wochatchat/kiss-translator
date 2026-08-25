@@ -23,6 +23,7 @@ import {
   getFromLang,
   prepareTimedTextEvents,
 } from "./youtubeSubtitleProcessing.js";
+import { NativeCaptionInplace } from "./nativeCaptionInplace.js";
 import {
   CONTROLS_SELECTOR,
   VIDEO_SELECTOR,
@@ -71,6 +72,8 @@ export class YouTubeCaptionProvider {
 
   // 控制双语字幕渲染、显示和位置计算的管理器实例
   #managerInstance = null;
+  // 原生字幕原位替换渲染器（沉浸式翻译方案）；与 #managerInstance 互斥使用
+  #inplaceRenderer = null;
   // 国际化文案翻译辅助函数
   #i18n = () => "";
   // YouTube 播放器按钮、菜单、通知等 DOM 操作管理器
@@ -331,6 +334,8 @@ export class YouTubeCaptionProvider {
       name === "displayOrder"
     ) {
       this.#managerInstance?.updateSetting({ [name]: value });
+      // 原位替换模式下双语/显示顺序变化需要立即重刷当前可见段落
+      this.#inplaceRenderer?.sync();
     } else if (name === "segSlug" || name === "forceSubtitleRetranslate") {
       this.#reProcessEvents();
     } else if (name === "autoTranslate") {
@@ -697,6 +702,7 @@ export class YouTubeCaptionProvider {
         progressed
       );
       this.#startManager();
+      this.#inplaceRenderer?.sync();
       this.#managerInstance?.repairChunkTranslations(managedSubtitles);
     } catch (error) {
       if (error?.name === "AbortError") return;
@@ -757,10 +763,13 @@ export class YouTubeCaptionProvider {
       progressed
     );
 
-    if (!this.#managerInstance && this.#subtitles.length) {
+    if (!this.#managerInstance && !this.#inplaceRenderer && this.#subtitles.length) {
       // 首个流式句子到达时立即启动字幕管理器，不再等待整个 AI chunk 返回。
       this.#startManager();
     }
+
+    // 原位替换模式：新译文到达后立即重刷可见段落（含当前句的流式译文更新）
+    this.#inplaceRenderer?.sync();
 
     this.#managerInstance?.appendSubtitles(managedSubtitles);
     this.#subtitleListManager?.setBilingualSubtitles(
@@ -940,6 +949,46 @@ export class YouTubeCaptionProvider {
 
     logger.info("Youtube Provider: Starting manager...");
 
+    // 原位替换渲染模式（复刻沉浸式翻译方案）：不创建自绘悬浮层，
+    // 直接把译文写进 YouTube 原生字幕段落文本节点，单一渲染路径无闪跳。
+    if (this.#setting.inplaceRender === true) {
+      this.#inplaceRenderer = new NativeCaptionInplace({
+        getSubtitles: () => this.#subtitles,
+        setting: this.#setting,
+      });
+      // 侧边字幕列表与悬浮层共用同一更新回调，保持联动行为一致
+      const showListInplace = isSubtitleModeEnabled(
+        this.#setting.showList,
+        this.#setting.enhanceMode
+      );
+      if (showListInplace && !this.#subtitleListManager) {
+        this.#subtitleListManager = new YouTubeSubtitleList(
+          videoEl,
+          this.#i18n,
+          {
+            enableHoverLookup: isSubtitleModeEnabled(
+              this.#setting.hoverLookupMode,
+              this.#setting.enhanceMode
+            ),
+            autoFavWord: this.#setting.autoFavWord === true,
+          }
+        );
+        this.#subtitleListManager.initialize(
+          this.#subtitles,
+          this.#rawSubtitleEvents,
+          this.#progressed
+        );
+        this.#inplaceRenderer.onSubtitleUpdate = (subtitleUpdate) => {
+          this.#subtitleListManager.updateSingleSubtitle(subtitleUpdate);
+        };
+        this.#subtitleListManager.turnOnAutoSub();
+      }
+      // 原生字幕窗口本身就是译文字幕窗口，无需隐藏
+      this.#inplaceRenderer.start();
+      this.#playerUi.showNotification(this.#i18n("subtitle_load_succeed"));
+      return;
+    }
+
     this.#managerInstance = new BilingualSubtitleManager({
       videoEl,
       formattedSubtitles: this.#subtitles,
@@ -992,6 +1041,18 @@ export class YouTubeCaptionProvider {
    */
   #destroyManager() {
     this.#playerUi.showYtCaption();
+
+    // 原位替换渲染器的销毁：停止观察并恢复所有段落原文
+    if (this.#inplaceRenderer) {
+      this.#inplaceRenderer.onSubtitleUpdate = null;
+      this.#inplaceRenderer.stop();
+      this.#inplaceRenderer = null;
+      if (this.#subtitleListManager) {
+        this.#subtitleListManager.destroy();
+        this.#subtitleListManager = null;
+      }
+      return;
+    }
 
     if (!this.#managerInstance) {
       return;
