@@ -158,9 +158,9 @@ export class YouTubeCaptionProvider {
         }
       } else if (event.data?.type === "KISS_TIMEDTEXT_TRANSLATE") {
         // 页面世界拦截到 timedtext 请求并请求翻译：把文本行送翻译后推回改写
-        const { requestKey, lines } = event.data;
+        const { requestKey, url, lines } = event.data;
         if (requestKey && lines?.length) {
-          this.#translateForRewrite(requestKey, lines);
+          this.#translateForRewrite(requestKey, url, lines);
         }
       }
     });
@@ -1045,24 +1045,33 @@ export class YouTubeCaptionProvider {
    * 与 #handleInterceptedRequest 的断句/悬浮层流程完全独立，互不影响。
    *
    * @private
-   * @param {string} requestKey 页面世界生成的请求标识。
+   * @param {string} requestKey 页面世界生成的请求标识（视频|语言|轨道 组合键）。
+   * @param {string} requestUrl 拦截到的 timedtext 请求 URL。
    * @param {Array<string>} lines 待翻译的原文文本行（已去重）。
    * @returns {Promise<void>}
    */
-  async #translateForRewrite(requestKey, lines) {
+  async #translateForRewrite(requestKey, requestUrl, lines) {
     try {
       const {
-        fromLang = this.#fromLang || "auto",
         toLang,
         apiSetting: rawApiSetting,
-        docInfo,
-        translateVariants = true,
+        docInfo: settingDocInfo = {},
         prompts,
       } = this.#setting;
 
-      const apiSetting = resolveApiPromptSettings(rawApiSetting, prompts, this.#setting);
+      // 源语言优先取字幕轨识别结果，其次自动检测
+      const fromLang = this.#fromLang || "auto";
+      const docInfo = Object.keys(settingDocInfo || {}).length
+        ? settingDocInfo
+        : getDocInfo();
+      // 与 BilingualSubtitleManager 相同的 prompt 解析路径，确保翻译提示词一致
+      const apiSetting = resolveApiPromptSettings(
+        rawApiSetting,
+        prompts,
+        this.#setting
+      );
 
-      // 并发翻译全部文本行；单行失败置空，改写时该行保留原文兜底
+      // 并发翻译全部文本行；单行失败置空，改写时该行所在整句保留原文兜底
       const translations = await Promise.all(
         lines.map((text) =>
           apiTranslate({
@@ -1071,7 +1080,6 @@ export class YouTubeCaptionProvider {
             toLang,
             apiSetting,
             docInfo,
-            translateVariants,
           })
             .then((r) => r?.trText || "")
             .catch(() => "")
@@ -1084,7 +1092,6 @@ export class YouTubeCaptionProvider {
           requestKey,
           lines,
           translations,
-          dropUntranslated: true, // 纯译文模式：命中译文的行替换，整句无译文才保留原文
         },
         window.location.origin
       );
