@@ -2,7 +2,7 @@ import { browser } from "../libs/browser";
 import { isExt } from "../libs/client";
 import { injectExternalJs, injectInlineJs } from "../libs/injector";
 import { shadowRootInjector } from "./shadowroot";
-import { XMLHttpRequestInjector } from "./xmlhttp";
+import { TimedTextRewriteInjector } from "./timedtextRewrite";
 
 // 注入脚本名称映射常数
 export const INJECTOR = {
@@ -12,7 +12,7 @@ export const INJECTOR = {
 
 // 注入器脚本实现映射表
 const injectorMap = {
-  [INJECTOR.subtitle]: XMLHttpRequestInjector,
+  [INJECTOR.subtitle]: TimedTextRewriteInjector,
   [INJECTOR.shadowroot]: shadowRootInjector,
 };
 

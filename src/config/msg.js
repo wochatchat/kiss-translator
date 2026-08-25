@@ -52,6 +52,7 @@ export const EVENT_FAVORITE_WORD_CHANGE = "kiss_favorite_word_change"; // 当前
 
 // --- 视频与字幕翻译特定消息类型 ---
 export const MSG_XHR_DATA_YOUTUBE = "KISS_XHR_DATA_YOUTUBE"; // 传递 YouTube 拦截到的字幕 XHR 数据
+export const MSG_TIMEDTEXT_REWRITE = "KISS_TIMEDTEXT_REWRITE"; // 内容脚本 -> 页面世界：推送译文用于改写 timedtext 响应
 
 // --- 字幕菜单控制状态类型 ---
 export const MSG_MENUS_PROGRESSED = "progressed"; // 进度事件

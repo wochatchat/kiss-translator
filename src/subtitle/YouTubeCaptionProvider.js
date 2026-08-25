@@ -1,13 +1,14 @@
 import { logger } from "../libs/log.js";
-import { apiSubtitle, apiSummarizeContext } from "../apis/index.js";
+import { apiSubtitle, apiSummarizeContext, apiTranslate } from "../apis/index.js";
 import { BilingualSubtitleManager } from "./BilingualSubtitleManager.js";
 import { YouTubeSubtitleList } from "./YouTubeSubtitleList.js";
-import { MSG_XHR_DATA_YOUTUBE, API_SPE_TYPES } from "../config";
+import { MSG_XHR_DATA_YOUTUBE, MSG_TIMEDTEXT_REWRITE, API_SPE_TYPES } from "../config";
 import { downloadBlobFile } from "../libs/utils.js";
 import { newI18n } from "../config";
 import { buildBilingualVtt } from "./vtt.js";
 import { getDocInfo } from "../libs/docInfo.js";
 import { isSubtitleModeEnabled } from "./modes.js";
+import { resolveApiPromptSettings } from "../config/prompt.js";
 import { clearMsgHistory } from "../apis/history.js";
 import {
   buildTrackKey,
@@ -154,6 +155,12 @@ export class YouTubeCaptionProvider {
         const { url, response } = event.data;
         if (url && response) {
           this.#handleInterceptedRequest(url, response);
+        }
+      } else if (event.data?.type === "KISS_TIMEDTEXT_TRANSLATE") {
+        // 页面世界拦截到 timedtext 请求并请求翻译：把文本行送翻译后推回改写
+        const { requestKey, lines } = event.data;
+        if (requestKey && lines?.length) {
+          this.#translateForRewrite(requestKey, lines);
         }
       }
     });
@@ -1031,6 +1038,59 @@ export class YouTubeCaptionProvider {
     this.#managerInstance.start();
     this.#playerUi.showNotification(this.#i18n("subtitle_load_succeed"));
     this.#playerUi.hideYtCaption();
+  }
+
+  /**
+   * 响应改写路径：翻译页面世界派发来的字幕文本行，并把"原文->译文"映射推回页面世界。
+   * 与 #handleInterceptedRequest 的断句/悬浮层流程完全独立，互不影响。
+   *
+   * @private
+   * @param {string} requestKey 页面世界生成的请求标识。
+   * @param {Array<string>} lines 待翻译的原文文本行（已去重）。
+   * @returns {Promise<void>}
+   */
+  async #translateForRewrite(requestKey, lines) {
+    try {
+      const {
+        fromLang = this.#fromLang || "auto",
+        toLang,
+        apiSetting: rawApiSetting,
+        docInfo,
+        translateVariants = true,
+        prompts,
+      } = this.#setting;
+
+      const apiSetting = resolveApiPromptSettings(rawApiSetting, prompts, this.#setting);
+
+      // 并发翻译全部文本行；单行失败置空，改写时该行保留原文兜底
+      const translations = await Promise.all(
+        lines.map((text) =>
+          apiTranslate({
+            text,
+            fromLang,
+            toLang,
+            apiSetting,
+            docInfo,
+            translateVariants,
+          })
+            .then((r) => r?.trText || "")
+            .catch(() => "")
+        )
+      );
+
+      window.postMessage(
+        {
+          type: MSG_TIMEDTEXT_REWRITE,
+          requestKey,
+          lines,
+          translations,
+          dropUntranslated: true, // 纯译文模式：命中译文的行替换，整句无译文才保留原文
+        },
+        window.location.origin
+      );
+    } catch (error) {
+      logger.info("Youtube Provider: translate for rewrite failed", error);
+    }
   }
 
   /**
