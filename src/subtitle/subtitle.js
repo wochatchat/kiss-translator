@@ -9,6 +9,8 @@ import { injectJs, INJECTOR } from "../injectors/index.js";
 // 目前仅配置了 YouTube 的匹配规则 (pattern) 及其对应的初始化引导器 (YouTubeInitializer)
 const providers = [
   { pattern: "https://www.youtube.com", start: YouTubeInitializer },
+  // 移动版 YouTube：x浏览器 等移动端 UA 会被 302 到 m. 域名
+  { pattern: "https://m.youtube.com", start: YouTubeInitializer },
 ];
 
 /**
