@@ -66,6 +66,65 @@
   - `Alt+O` 打开设置页面
   - `Alt+I` 输入框翻译
 
+---
+
+## 🎬 视频字幕纯译文模式（feat-native-caption-inplace 分支）
+
+> **分支**：[`feat-native-caption-inplace`](https://github.com/wochatchat/kiss-translator/tree/feat-native-caption-inplace)
+> **状态**：已在安卓 x浏览器 油猴 + m.youtube.com 真机验证通过
+> **效果**：只显示译文字幕，彻底消除原/译字幕交替闪跳
+
+### 方案原理：三层递进防御
+
+复刻沉浸式翻译的核心理念——**不与 YouTube 对抗渲染权，而是在数据源头把字幕换成中文**：
+
+```
+┌─ 第一层：timedtext 响应改写（主防线）
+│    页面世界 hook fetch/XHR，拦截 /api/timedtext 字幕请求，
+│    翻译后直接回写响应体 → 播放器拿到的"原字幕"就是中文
+│
+├─ 第二层：DOM 原位替换（兜底）
+│    MutationObserver 监听 .ytp-caption-segment，
+│    已知映射的英文 cue 在绘制前被原地替换为译文
+│
+└─ 第三层：就地主动翻译（最后防线）
+     三层映射都未命中的英文文本，当场发起翻译并立即上屏
+```
+
+无论播放器用 DOM 还是 TextTrack 渲染，任何漏网英文都会被后两层接住。
+
+### 关键实现位置
+
+| 文件 | 职责 |
+|---|---|
+| `src/injectors/timedtextRewrite.js` | 页面世界注入器：fetch/XHR 双拦截、json3 解析、请求级缓存（键剥离签名参数）、阻塞式预取、响应体回写。**必须完全自包含**（油猴按 `(${fn})()` 序列化注入，模块级导入在页面世界不存在） |
+| `src/subtitle/nativeCaptionInplace.js` | DOM 兜底渲染器：MutationObserver 原位替换、`ingestTranslations()` 接收译文映射、主动翻译通道（pending 归一化去重）、空窗口收缩、字号锁定 |
+| `src/subtitle/YouTubeCaptionProvider.js` | 翻译调度中枢：`#translateLines()` 公共批量翻译（复用 apiTranslate 全管线）、`#translateForRewrite()` 推送译文给注入器与 DOM 层 |
+| `src/subtitle/subtitle.js` | 站点匹配入口：providers[] 必须同时包含 `www.youtube.com` 与 **`m.youtube.com`**（移动端 UA 被 302，漏配则整个模块不启动） |
+
+### 关键配置开关
+
+```js
+// src/config/setting.js — DEFAULT_SUBTITLE_SETTING
+inplaceRender: true   // true=纯译文模式（本分支方案）；false=回退旧双语悬浮层
+```
+
+### 踩坑记录（重要）
+
+1. **m.youtube.com 未匹配**：移动端访问域名是 `m.`，只配 `www.youtube.com` 会导致字幕模块静默不启动——所有下游修复都是死代码。真机问题先用诊断脚本拿事实，不要盲改。
+2. **注入器序列化陷阱**：函数体内引用模块级常量/helper 会在序列化后变 ReferenceError，一拦截就崩。
+3. **字幕分块流式加载**：同一视频会发多个分段请求，每段独立翻译；缓存命中时应跳过预取（省配额，且部分请求因移动端 POT 令牌校验返回空体）。
+4. **YouTube 动态字号**：YT 按 cue 文本长度实时调整 inline font-size，原位替换改变文本长度会触发尺寸抖动——用 `!important` 锁定字号并禁用容器内 transition。
+5. **空白大框**：结构重建中间态/空响应会产生"已扩容无内容"的 cue 容器——`:empty` 隐藏 + 无可见文本时收缩整个窗口。
+
+### 构建产物
+
+```bash
+pnpm build:web   # 产物: build/web/kiss-translator.user.js（油猴单文件）
+```
+
+---
+
 ## 安装
 
 > 注：基于以下原因，建议优先使用浏览器扩展
