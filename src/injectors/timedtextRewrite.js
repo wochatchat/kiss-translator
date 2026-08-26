@@ -290,18 +290,22 @@ export function TimedTextRewriteInjector() {
 
     var info = urlInfo(rawUrl);
 
-    // 阻塞语义：先自行取回原始数据并完成翻译，之后才放行播放器真正的请求。
-    // 放行前重写 open 的目标 URL 为 json3 格式，保证能读到可解析的响应。
-    var prefetch = originalFetch(info.url)
-      .then(function (r) {
-        return r.ok ? r.text() : "";
-      })
-      .then(function (text) {
-        return text ? ensureTranslated(rawUrl, text) : false;
-      })
-      .catch(function () {
-        return false;
-      });
+    // 缓存命中时跳过预取：少消耗一次字幕请求配额（部分响应会因令牌校验返回空体），
+    // 直接放行播放器请求，在响应读取阶段用缓存映射改写。
+    var cached = cache.get(info.key);
+    var prefetch =
+      cached && cached.size
+        ? Promise.resolve(true)
+        : originalFetch(info.url)
+            .then(function (r) {
+              return r.ok ? r.text() : "";
+            })
+            .then(function (text) {
+              return text ? ensureTranslated(rawUrl, text) : false;
+            })
+            .catch(function () {
+              return false;
+            });
 
     return prefetch.then(function () {
       // 以 json3 版本的 URL 发起播放器自己的请求（签名等参数保持原样）

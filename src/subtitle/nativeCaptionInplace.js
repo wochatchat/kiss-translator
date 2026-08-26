@@ -45,15 +45,23 @@ export class NativeCaptionInplace {
   // 响应改写链路推送的兜底译文：归一化原文 -> 纯译文文本。
   // 主链路（timedtext 响应改写）漏网的英文 cue 由该映射在 DOM 层接住。
   #fallbackTranslations = new Map();
+  // 主动翻译通道：provider 注入的回调 (texts: string[]) => Promise<string[]>。
+  // 漏网的英文 cue 不再干等主链路喂映射，而是就地发起翻译。
+  #translateTexts = null;
+  // 已派发主动翻译、等待回填的原文集合（防重复请求）
+  #pendingTranslate = new Set();
 
   /**
    * @param {object} param0 参数对象。
    * @param {Function} param0.getSubtitles 获取当前已处理字幕数组的函数。
    * @param {object} param0.setting 字幕设置对象。
+   * @param {Function} [param0.translateTexts] 主动翻译回调，入参文本数组，回参译文数组。
    */
-  constructor({ getSubtitles, setting }) {
+  constructor({ getSubtitles, setting, translateTexts }) {
     this.#getSubtitles = getSubtitles;
     this.#setting = setting || {};
+    this.#translateTexts =
+      typeof translateTexts === "function" ? translateTexts : null;
     // 绑定上下文，保证作为观察器回调与事件处理器时 this 指向正确
     this.handleMutations = this.handleMutations.bind(this);
     this.sync = this.sync.bind(this);
@@ -109,6 +117,17 @@ export class NativeCaptionInplace {
   }
 
   /**
+   * 标记文本已被其他链路（如响应改写）翻译过，主动翻译通道不再重复请求。
+   *
+   * @param {string} text 原文文本。
+   * @returns {void}
+   */
+  markTranslated(text) {
+    const key = normalizeKey(text);
+    if (key) this.#pendingTranslate.add(key);
+  }
+
+  /**
    * 依据最新的字幕数据重建翻译映射，并对当前可见段落立即应用替换。
    * 由 provider 在每批新译文到达后调用，保证流式翻译结果能及时刷上屏幕。
    *
@@ -121,6 +140,42 @@ export class NativeCaptionInplace {
     for (const segment of segments) {
       this.applyToSegment(segment);
     }
+  }
+
+  /**
+   * 主动翻译通道：对映射中查不到译文的文本发起就地翻译，
+   * 完成后写入兜底映射并重刷可见段落。这是漏网英文的最后防线。
+   *
+   * @param {string[]} texts 未命中任何映射的原文文本列表。
+   * @returns {void}
+   */
+  #requestTranslations(texts) {
+    if (!this.#translateTexts) return;
+    const todo = texts.filter((t) => {
+      const key = normalizeKey(t);
+      return !this.#pendingTranslate.has(key) && t.length < 500;
+    });
+    if (!todo.length) return;
+    todo.forEach((t) => this.#pendingTranslate.add(normalizeKey(t)));
+
+    Promise.resolve(this.#translateTexts(todo))
+      .then((results) => {
+        if (!Array.isArray(results)) return;
+        const map = new Map();
+        todo.forEach((text, i) => {
+          const tr = String(results[i] || "").trim();
+          if (tr) {
+            map.set(text, tr);
+          }
+        });
+        if (map.size) {
+          this.ingestTranslations(map);
+        }
+      })
+      .catch(() => {
+        // 翻译失败：解除 pending 标记，允许后续重试
+        todo.forEach((t) => this.#pendingTranslate.delete(normalizeKey(t)));
+      });
   }
 
   /**
@@ -185,7 +240,11 @@ export class NativeCaptionInplace {
         : currentText;
 
     const replacement = this.#resolveReplacement(original);
-    if (!replacement || replacement === currentText) return;
+    if (!replacement || replacement === currentText) {
+      // 三层映射全部未命中：判定为漏网的英文 cue，发起就地翻译。
+      this.#requestTranslations([original]);
+      return;
+    }
 
     const sub = this.#translationMap.get(normalizeKey(original));
     this.#applied.set(segment, { original, applied: replacement });

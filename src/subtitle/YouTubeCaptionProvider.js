@@ -960,11 +960,13 @@ export class YouTubeCaptionProvider {
     // 直接把译文写进 YouTube 原生字幕段落文本节点，单一渲染路径无闪跳。
     if (this.#setting.inplaceRender === true) {
       // 兜底层常驻：无论主链路（响应改写）是否已接管数据源，
-      // DOM 观察器都会把漏网请求放行的英文 cue 在绘制前替换为译文。
+      // DOM 观察器都会把漏网请求放行的英文 cue 在绘制前替换为译文；
+      // 三层映射都未命中的文本还会通过 translateTexts 就地发起翻译。
       if (!this.#inplaceRenderer) {
         this.#inplaceRenderer = new NativeCaptionInplace({
           getSubtitles: () => this.#subtitles,
           setting: this.#setting,
+          translateTexts: (texts) => this.#translateLines(texts),
         });
         this.#inplaceRenderer.start();
       }
@@ -1045,6 +1047,49 @@ export class YouTubeCaptionProvider {
   }
 
   /**
+   * 批量翻译文本行的公共实现：供响应改写链路与 DOM 兜底的主动翻译共用。
+   *
+   * @private
+   * @param {Array<string>} lines 待翻译的原文文本行。
+   * @returns {Promise<Array<string>>} 与输入等长的译文数组（失败项为空串）。
+   */
+  async #translateLines(lines) {
+    const {
+      toLang,
+      apiSetting: rawApiSetting,
+      docInfo: settingDocInfo = {},
+      prompts,
+    } = this.#setting;
+
+    // 源语言优先取字幕轨识别结果，其次自动检测
+    const fromLang = this.#fromLang || "auto";
+    const docInfo = Object.keys(settingDocInfo || {}).length
+      ? settingDocInfo
+      : getDocInfo();
+    // 与 BilingualSubtitleManager 相同的 prompt 解析路径，确保翻译提示词一致
+    const apiSetting = resolveApiPromptSettings(
+      rawApiSetting,
+      prompts,
+      this.#setting
+    );
+
+    // 并发翻译全部文本行；单行失败置空，由调用方决定兜底行为
+    return Promise.all(
+      lines.map((text) =>
+        apiTranslate({
+          text,
+          fromLang,
+          toLang,
+          apiSetting,
+          docInfo,
+        })
+          .then((r) => r?.trText || "")
+          .catch(() => "")
+      )
+    );
+  }
+
+  /**
    * 响应改写路径：翻译页面世界派发来的字幕文本行，并把"原文->译文"映射推回页面世界。
    * 与 #handleInterceptedRequest 的断句/悬浮层流程完全独立，互不影响。
    *
@@ -1060,39 +1105,7 @@ export class YouTubeCaptionProvider {
    */
   async #translateForRewrite(requestKey, requestUrl, lines) {
     try {
-      const {
-        toLang,
-        apiSetting: rawApiSetting,
-        docInfo: settingDocInfo = {},
-        prompts,
-      } = this.#setting;
-
-      // 源语言优先取字幕轨识别结果，其次自动检测
-      const fromLang = this.#fromLang || "auto";
-      const docInfo = Object.keys(settingDocInfo || {}).length
-        ? settingDocInfo
-        : getDocInfo();
-      // 与 BilingualSubtitleManager 相同的 prompt 解析路径，确保翻译提示词一致
-      const apiSetting = resolveApiPromptSettings(
-        rawApiSetting,
-        prompts,
-        this.#setting
-      );
-
-      // 并发翻译全部文本行；单行失败置空，改写时该行所在整句保留原文兜底
-      const translations = await Promise.all(
-        lines.map((text) =>
-          apiTranslate({
-            text,
-            fromLang,
-            toLang,
-            apiSetting,
-            docInfo,
-          })
-            .then((r) => r?.trText || "")
-            .catch(() => "")
-        )
-      );
+      const translations = await this.#translateLines(lines);
 
       // 喂给 DOM 兜底渲染器：原文行 -> 译文
       const fallbackMap = new Map();
@@ -1101,6 +1114,10 @@ export class YouTubeCaptionProvider {
       });
       if (fallbackMap.size && this.#inplaceRenderer) {
         this.#inplaceRenderer.ingestTranslations(fallbackMap);
+        // 同步进主动翻译通道的去重表，避免兜底层对同一文本重复请求
+        for (const text of fallbackMap.keys()) {
+          this.#inplaceRenderer.markTranslated?.(text);
+        }
       }
 
       window.postMessage(
