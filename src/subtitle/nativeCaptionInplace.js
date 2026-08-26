@@ -39,6 +39,18 @@ ${CAPTION_CONTAINER_SELECTOR} {
   left: 50% !important;
   transform: translateX(-50%) !important;
 }
+/* 锁定字号：YouTube 会按 cue 文本长度动态调整字号（inline font-size 随内容变化），
+   原位替换改变文本长度会触发其自适应逻辑，导致同一句字幕尺寸反复变化。
+   用 !important 压掉 YouTube 写在元素上的动态 inline 字号，固定为相对视口档位。 */
+${CAPTION_CONTAINER_SELECTOR} span,
+${CAPTION_CONTAINER_SELECTOR} .ytp-caption-segment {
+  font-size: 3.5cqw !important;
+  line-height: 1.4 !important;
+}
+${CAPTION_CONTAINER_SELECTOR} * {
+  transition: none !important;
+  animation: none !important;
+}
 `;
   (document.head || document.documentElement).appendChild(style);
 }
