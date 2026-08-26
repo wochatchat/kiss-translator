@@ -43,13 +43,21 @@ ${CAPTION_CONTAINER_SELECTOR} {
    原位替换改变文本长度会触发其自适应逻辑，导致同一句字幕尺寸反复变化。
    用 !important 压掉 YouTube 写在元素上的动态 inline 字号，固定为相对视口档位。 */
 ${CAPTION_CONTAINER_SELECTOR} span,
-${CAPTION_CONTAINER_SELECTOR} .ytp-caption-segment {
+${CAPTION_CONTAINER_SELECTOR} span.ytp-caption-segment {
   font-size: 3.5cqw !important;
   line-height: 1.4 !important;
 }
+/* 过渡禁用必须覆盖容器自身：YouTube 在窗口元素上也有过渡，
+   漏掉容器会导致整体尺寸变化被动画放大成明显的"重绘"。 */
+${CAPTION_CONTAINER_SELECTOR},
 ${CAPTION_CONTAINER_SELECTOR} * {
   transition: none !important;
   animation: none !important;
+}
+/* 翻译未就绪的段落直接不参与布局：宁可短暂无字幕，
+   也不让英文帧先画出来再被替换成中文（行数不同 → 背景框当场变高）。 */
+${CAPTION_CONTAINER_SELECTOR} [data-kiss-hold] {
+  display: none !important;
 }
 `;
   (document.head || document.documentElement).appendChild(style);
@@ -87,6 +95,13 @@ export class NativeCaptionInplace {
   #translateTexts = null;
   // 已派发主动翻译、等待回填的原文集合（防重复请求）
   #pendingTranslate = new Set();
+
+  // 翻译失败键的冷却表：key -> 失败时间戳。冷却期内不重试、不 hold，
+  // 防止「失败→重刷→再发起」形成无限异步循环（真机上会疯狂打翻译接口）。
+  #failedCooldown = new Map();
+
+  // 冷却时长（毫秒）
+  static COOLDOWN_MS = 30_000;
 
   /**
    * @param {object} param0 参数对象。
@@ -192,31 +207,68 @@ export class NativeCaptionInplace {
    */
   #requestTranslations(texts) {
     if (!this.#translateTexts) return;
+    const now = Date.now();
     const todo = texts.filter((t) => {
       const key = normalizeKey(t);
-      return !this.#pendingTranslate.has(key) && t.length < 500;
+      if (this.#pendingTranslate.has(key)) return false;
+      const failedAt = this.#failedCooldown.get(key);
+      if (failedAt && now - failedAt < NativeCaptionInplace.COOLDOWN_MS) {
+        return false;
+      }
+      return t.length < 500;
     });
     if (!todo.length) return;
     todo.forEach((t) => this.#pendingTranslate.add(normalizeKey(t)));
 
+    const releaseAndRefresh = () => {
+      todo.forEach((t) => {
+        const key = normalizeKey(t);
+        this.#pendingTranslate.delete(key);
+        this.#failedCooldown.set(key, Date.now());
+      });
+      for (const segment of this.#querySegments()) {
+        this.applyToSegment(segment);
+      }
+    };
+
     Promise.resolve(this.#translateTexts(todo))
       .then((results) => {
-        if (!Array.isArray(results)) return;
+        if (!Array.isArray(results)) {
+          releaseAndRefresh();
+          return;
+        }
         const map = new Map();
         todo.forEach((text, i) => {
           const tr = String(results[i] || "").trim();
-          if (tr) {
-            map.set(text, tr);
-          }
+          if (tr) map.set(text, tr);
         });
         if (map.size) {
+          // 成功的键从冷却表移除（可能存在早前失败记录）
+          for (const text of map.keys()) {
+            this.#failedCooldown.delete(normalizeKey(text));
+          }
           this.ingestTranslations(map);
+        } else {
+          // 全部失败：解除 pending、进入冷却并重刷，挂起的段落回退显示原文
+          releaseAndRefresh();
         }
       })
       .catch(() => {
-        // 翻译失败：解除 pending 标记，允许后续重试
-        todo.forEach((t) => this.#pendingTranslate.delete(normalizeKey(t)));
+        // 翻译失败：解除 pending 标记并重刷，挂起的段落回退显示原文
+        releaseAndRefresh();
       });
+  }
+
+  /**
+   * 判断文本是否为"已知待翻译的英文"（曾发起过主动翻译且尚未失败）。
+   * 用于决定未命中译文时是否应该隐藏段落等待译文。
+   *
+   * @param {string} text 原文文本。
+   * @returns {boolean} 是否在翻译流程中。
+   */
+  #isKnownEnglish(text) {
+    const key = normalizeKey(text);
+    return key.length > 0 && this.#pendingTranslate.has(key);
   }
 
   /**
@@ -309,13 +361,28 @@ export class NativeCaptionInplace {
         : currentText;
 
     const replacement = this.#resolveReplacement(original);
-    if (!replacement || replacement === currentText) {
-      // 三层映射全部未命中：判定为漏网的英文 cue，发起就地翻译。
-      this.#requestTranslations([original]);
+    const key = normalizeKey(original);
+    const translating = key && this.#pendingTranslate.has(key);
+
+    if (!replacement) {
+      if (translating || this.#isKnownEnglish(original)) {
+        // 译文在路上（或已确认是待翻译的英文）：先隐藏段落，
+        // 不让英文帧画出来——否则英文→中文行数不同，背景框当场变高。
+        segment.setAttribute("data-kiss-hold", "1");
+        segment.textContent = original;
+      } else if (key) {
+        // 全新漏网英文：登记 pending 并发起就地翻译（下一轮 mutation 会 hold）
+        segment.removeAttribute("data-kiss-hold");
+        this.#requestTranslations([original]);
+      } else {
+        segment.removeAttribute("data-kiss-hold");
+      }
       return;
     }
 
-    const sub = this.#translationMap.get(normalizeKey(original));
+    // 译文就绪：一次性上屏（先写文本再摘 hold 标记，同帧完成，无中间态）
+    segment.removeAttribute("data-kiss-hold");
+    const sub = this.#translationMap.get(key);
     this.#applied.set(segment, { original, applied: replacement });
     segment.textContent = replacement;
 
