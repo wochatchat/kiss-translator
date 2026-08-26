@@ -19,6 +19,31 @@ const CAPTION_CONTAINER_SELECTOR = "#ytp-caption-window-container";
 const CAPTION_SEGMENT_SELECTOR = ".ytp-caption-segment";
 
 /**
+ * 注入一次性样式表：约束字幕窗口与空 cue 的渲染行为。
+ * 1. 空内容段落（len=0 空响应 / 结构重建中间态）不显示背景框；
+ * 2. 字幕窗口尺寸只由实际文本内容撑开，防止出现覆盖视频的巨大空框。
+ * 样式幂等：已存在则跳过。
+ */
+function ensureCaptionStyle() {
+  if (document.getElementById("kiss-caption-inplace-style")) return;
+  const style = document.createElement("style");
+  style.id = "kiss-caption-inplace-style";
+  style.textContent = `
+.${CAPTION_SEGMENT_SELECTOR.slice(1)}:empty {
+  display: none !important;
+}
+${CAPTION_CONTAINER_SELECTOR} {
+  width: fit-content !important;
+  height: fit-content !important;
+  max-width: 90% !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+}
+`;
+  (document.head || document.documentElement).appendChild(style);
+}
+
+/**
  * 归一化文本用作翻译匹配 Key。
  * 折叠连续空白并去除首尾空白，抹平 JSON3 数据与 DOM 渲染文本之间的空白差异。
  *
@@ -74,6 +99,9 @@ export class NativeCaptionInplace {
    */
   start() {
     if (this.#observer) return;
+
+    // 约束字幕窗口尺寸、隐藏空段落，防止出现覆盖视频的空白背景框
+    ensureCaptionStyle();
 
     this.#observer = new MutationObserver(this.handleMutations);
     this.#observer.observe(document.body, {
@@ -140,6 +168,7 @@ export class NativeCaptionInplace {
     for (const segment of segments) {
       this.applyToSegment(segment);
     }
+    this.#collapseEmptyWindows();
   }
 
   /**
@@ -207,6 +236,34 @@ export class NativeCaptionInplace {
     if (touched) {
       for (const segment of this.#querySegments()) {
         this.applyToSegment(segment);
+      }
+      this.#collapseEmptyWindows();
+    }
+  }
+
+  /**
+   * 收缩空字幕窗口：当容器存在但没有任何可见文本时（空 cue / 结构重建
+   * 中间态），隐藏其背景框，避免出现覆盖视频的巨大空白区域。
+   * 容器有实际文本时恢复显示。通过 data 属性标记状态保证幂等。
+   *
+   * @returns {void}
+   */
+  #collapseEmptyWindows() {
+    const containers = document.querySelectorAll(CAPTION_CONTAINER_SELECTOR);
+    for (const container of containers) {
+      const hasText = normalizeKey(container.textContent || "") !== "";
+      if (!hasText) {
+        if (container.dataset.kissCollapsed !== "1") {
+          container.dataset.kissCollapsed = "1";
+          container.style.setProperty("display", "none", "important");
+        }
+      } else if (container.dataset.kissCollapsed === "1") {
+        delete container.dataset.kissCollapsed;
+        container.style.removeProperty("display");
+        // 恢复后立即对段落做一轮替换，防止原文帧被绘制
+        for (const segment of this.#querySegments()) {
+          this.applyToSegment(segment);
+        }
       }
     }
   }
